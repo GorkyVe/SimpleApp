@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>pepijn.show — minimal login + note</title>
+  <style>
+    :root { --gap: 12px; --w: 760px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 0; background: #f6f7f9; }
+    header { background:#111; color:#fff; padding:14px 20px; }
+    main { max-width: var(--w); margin: 30px auto; padding: 0 16px; }
+    .card { background:#fff; border-radius:16px; box-shadow: 0 8px 24px rgba(0,0,0,.08); padding:20px; }
+    .row { display:flex; align-items:center; gap: var(--gap); }
+    .hidden { display:none; }
+    textarea { width:100%; min-height:240px; font-size:16px; line-height:1.5; padding:12px; border-radius:12px; border:1px solid #ddd; outline:none; }
+    textarea:focus { border-color:#888; }
+    button { padding:10px 14px; border-radius:10px; border:1px solid #ddd; background:#fff; cursor:pointer; }
+    button:hover { background:#f1f1f1; }
+    #status { font-size:12px; color:#666; margin-top:8px; }
+    #user img { width:36px; height:36px; border-radius:50%; }
+    #user .email { font-weight:600; }
+    footer { text-align:center; color:#999; font-size:12px; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <header><strong>pepijn.show</strong> — super minimal login + server note</header>
+  <main>
+    <div class="card" id="auth">
+      <p>Welcome! Sign in to store a personal note on the server.</p>
+      <button id="login">Sign in with Google</button>
+    </div>
+
+    <div class="card hidden" id="app">
+      <div class="row" id="user">
+        <img id="avatar" alt="">
+        <div>
+          <div class="email" id="email"></div>
+          <button id="logout">Log out</button>
+        </div>
+      </div>
+
+      <div style="height:12px"></div>
+      <label for="note"><strong>Your note (auto-saves)</strong></label>
+      <textarea id="note" placeholder="Type anything… it’s saved to your server row."></textarea>
+      <div id="status">…</div>
+    </div>
+    <footer>Built with Supabase Auth + Postgres (RLS). No custom backend.</footer>
+  </main>
+
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    // TODO: replace with your values from Supabase → Settings → API
+    const SUPABASE_URL = "https://moadeautedjowrjuufyi.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1vYWRlYXV0ZWRqb3dyanV1ZnlpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYzMDI0OTIsImV4cCI6MjA3MTg3ODQ5Mn0.oSOM1L4J4AWL_1n0hsujqGC6jz41PGthfrLj4RUbjWM";
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // UI elements
+    const elAuth = document.getElementById("auth");
+    const elApp  = document.getElementById("app");
+    const elLogin = document.getElementById("login");
+    const elLogout = document.getElementById("logout");
+    const elEmail = document.getElementById("email");
+    const elAvatar = document.getElementById("avatar");
+    const elNote = document.getElementById("note");
+    const elStatus = document.getElementById("status");
+
+    let currentUser = null;
+    let saveTimer = null;
+
+    function showAuth() { elAuth.classList.remove("hidden"); elApp.classList.add("hidden"); }
+    function showApp()  { elApp.classList.remove("hidden");  elAuth.classList.add("hidden"); }
+
+    elLogin.addEventListener("click", async () => {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: window.location.origin }
+      });
+      if (error) alert(error.message);
+    });
+
+    elLogout.addEventListener("click", async () => {
+      await supabase.auth.signOut();
+    });
+
+    async function loadOrCreateNote(userId) {
+      elStatus.textContent = "Loading…";
+      const { data, error } = await supabase
+        .from("notes")
+        .select("content")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (error) {
+        console.error(error);
+        elStatus.textContent = "Load error";
+        return;
+      }
+
+      if (!data) {
+        // create empty row for this user
+        const { error: insErr } = await supabase.from("notes").insert({ user_id: userId, content: "" });
+        if (insErr && insErr.code !== "23505") console.error(insErr);
+        elNote.value = "";
+      } else {
+        elNote.value = data.content || "";
+      }
+      elStatus.textContent = "Loaded";
+    }
+
+    async function saveNote() {
+      if (!currentUser) return;
+      elStatus.textContent = "Saving…";
+      const { error } = await supabase
+        .from("notes")
+        .upsert({ user_id: currentUser.id, content: elNote.value }, { onConflict: "user_id" });
+
+      if (error) {
+        console.error(error);
+        elStatus.textContent = "Save failed";
+        return;
+      }
+      elStatus.textContent = "Saved";
+    }
+
+    elNote.addEventListener("input", () => {
+      elStatus.textContent = "Editing…";
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveNote, 500); // debounce autosave
+    });
+
+    // React to auth changes
+    supabase.auth.onAuthStateChange(async (_event, session) => {
+      currentUser = session?.user || null;
+      if (currentUser) {
+        showApp();
+        elEmail.textContent = currentUser.email;
+        elAvatar.src = currentUser.user_metadata?.avatar_url || "";
+        await loadOrCreateNote(currentUser.id);
+      } else {
+        showAuth();
+        elEmail.textContent = "";
+        elAvatar.src = "";
+        elNote.value = "";
+        elStatus.textContent = "";
+      }
+    });
+
+    // Initial session (handles post-OAuth redirect)
+    const { data: { session } } = await supabase.auth.getSession();
+    currentUser = session?.user || null;
+    if (currentUser) {
+      showApp();
+      elEmail.textContent = currentUser.email;
+      elAvatar.src = currentUser.user_metadata?.avatar_url || "";
+      await loadOrCreateNote(currentUser.id);
+    } else {
+      showAuth();
+    }
+  </script>
+</body>
+</html>
